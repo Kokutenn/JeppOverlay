@@ -1,49 +1,66 @@
 import streamlit as st
 import cv2
 import numpy as np
-import geopandas as gpd
-from shapely.geometry import Point, Polygon
+import rasterio
+from rasterio.transform import Affine
+from rasterio.enums import Resampling
 from PIL import Image
 import tempfile
 import os
+import subprocess
 
 # Function to load and display the image
 def load_image(image_file):
     img = Image.open(image_file)
     return img
 
-# Function to create a temporary file for the KML output
-def create_temp_file(suffix):
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    return temp_file.name
+# Function to select points on the image
+def select_points(img_path):
+    img = cv2.imread(img_path)
+    points = []
 
-# Function to manually select points on the image
-def select_points(img):
-    st.write("Select at least three reference points on the image")
-    # Display image for point selection
-    points = st.image(img, use_column_width=True)
-    # In reality, you'd use a tool to let the user select points here.
-    # For simplicity, we assume the user knows the exact points.
-    st.write("You will need to manually input coordinates")
-    
-    # Example points, replace this with actual user inputs
-    coordinates = [(100, 150), (200, 250), (300, 350)]
-    
-    return coordinates
+    def click_event(event, x, y, flags, params):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            cv2.circle(img, (x, y), 5, (255, 0, 0), -1)
+            cv2.imshow("Image", img)
 
-# Function to georeference the image
-def georeference_image(img, points, real_coords):
-    # Here, you'd implement the actual georeferencing algorithm
-    # This is a placeholder showing how you'd map points to real-world coordinates.
+    cv2.imshow("Image", img)
+    cv2.setMouseCallback("Image", click_event)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
     
-    # Assume the image is perfectly aligned and scale is correct for simplicity
-    h, w = img.shape[:2]
+    return points
+
+# Function to georeference the image using Rasterio
+def georeference_image(img_path, points, real_coords):
+    with rasterio.open(img_path) as src:
+        src_points = np.array(points, dtype=np.float32)
+        dst_points = np.array(real_coords, dtype=np.float32)
+
+        transform_matrix, *_ = cv2.getAffineTransform(src_points[:3], dst_points[:3])
+        
+        transform = Affine(
+            transform_matrix[0][0], transform_matrix[0][1], transform_matrix[0][2],
+            transform_matrix[1][0], transform_matrix[1][1], transform_matrix[1][2]
+        )
+
+        output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.tif').name
+        with rasterio.open(
+            output_path,
+            'w',
+            driver='GTiff',
+            height=src.height,
+            width=src.width,
+            count=src.count,
+            dtype=src.dtypes[0],
+            crs='EPSG:4326',
+            transform=transform,
+        ) as dst:
+            for i in range(1, src.count + 1):
+                dst.write(src.read(i, resampling=Resampling.nearest), i)
     
-    # Real world coordinates corresponding to the points
-    # You should input this from user data for real applications
-    real_coords = [(0, 0), (0, 1), (1, 0)]
-    
-    return real_coords
+    return output_path
 
 # Main Streamlit app
 st.title("Jeppesen Chart Georeferencing Tool")
@@ -55,40 +72,31 @@ if image_file is not None:
     img = load_image(image_file)
     st.image(img, caption="Uploaded Chart", use_column_width=True)
 
-    st.write("Now, select reference points on the chart and enter their real-world coordinates.")
-    points = select_points(np.array(img))
-
-    if points:
-        st.write("Enter real-world coordinates corresponding to selected points.")
+    st.write("Now, select reference points on the chart by clicking on the image.")
+    
+    # Save the uploaded file to a temporary location
+    temp_image_path = tempfile.NamedTemporaryFile(delete=False, suffix='.png').name
+    img.save(temp_image_path)
+    
+    if st.button("Select Points"):
+        points = select_points(temp_image_path)
         
-        # Example real-world coordinates
-        real_coords = [(34.000, -118.000), (34.001, -118.001), (34.002, -118.002)]
+        st.write(f"Selected Points: {points}")
         
-        st.write("Georeferencing the image...")
-        geo_img = georeference_image(np.array(img), points, real_coords)
+        if len(points) >= 3:
+            st.write("Enter the corresponding real-world coordinates.")
+            
+            # Example real-world coordinates
+            real_coords = [(34.000, -118.000), (34.001, -118.001), (34.002, -118.002)]
+            st.write(f"Using Real-world Coordinates: {real_coords}")
 
-        # Create a KML file for Google Earth
-        kml_file = create_temp_file(".kml")
-        with open(kml_file, 'w') as f:
-            f.write(f"""<?xml version="1.0" encoding="UTF-8"?>
-            <kml xmlns="http://www.opengis.net/kml/2.2">
-                <Document>
-                    <GroundOverlay>
-                        <Icon>
-                            <href>{image_file.name}</href>
-                        </Icon>
-                        <LatLonBox>
-                            <north>{real_coords[1][0]}</north>
-                            <south>{real_coords[0][0]}</south>
-                            <east>{real_coords[2][1]}</east>
-                            <west>{real_coords[0][1]}</west>
-                        </LatLonBox>
-                    </GroundOverlay>
-                </Document>
-            </kml>""")
-        
-        st.write("Download the georeferenced KML file for use in Google Earth.")
-        st.download_button(label="Download KML", data=open(kml_file, 'rb').read(), file_name="overlay.kml")
+            st.write("Georeferencing the image...")
+            geo_img_path = georeference_image(temp_image_path, points, real_coords)
 
-    else:
-        st.write("Please select reference points to proceed.")
+            # Download the georeferenced image
+            st.write("Download the georeferenced image file.")
+            st.download_button(label="Download Georeferenced Image", data=open(geo_img_path, 'rb').read(), file_name="georeferenced_chart.tif")
+
+        else:
+            st.write("Please select at least 3 points to proceed.")
+
