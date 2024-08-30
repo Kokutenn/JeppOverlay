@@ -1,4 +1,5 @@
 import streamlit as st
+import cv2
 import numpy as np
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
@@ -14,11 +15,24 @@ def load_image(image_file):
 
 # Function to georeference the image using Rasterio
 def georeference_image(img_path, points, real_coords):
-    with rasterio.open(img_path) as src:
-        src_points = np.array(points, dtype=np.float32)
-        dst_points = np.array(real_coords, dtype=np.float32)
+    # Ensure that at least three points are provided
+    if len(points) < 3 or len(real_coords) < 3:
+        st.error("At least three points are required for georeferencing.")
+        return None
 
-        transform_matrix, *_ = cv2.getAffineTransform(src_points[:3], dst_points[:3])
+    with rasterio.open(img_path) as src:
+        src_points = np.array(points[:3], dtype=np.float32)
+        dst_points = np.array(real_coords[:3], dtype=np.float32)
+
+        # Debugging output
+        st.write(f"Source Points: {src_points}")
+        st.write(f"Destination Points: {dst_points}")
+
+        try:
+            transform_matrix, *_ = cv2.getAffineTransform(src_points, dst_points)
+        except Exception as e:
+            st.error(f"Error computing affine transform: {e}")
+            return None
         
         transform = Affine(
             transform_matrix[0][0], transform_matrix[0][1], transform_matrix[0][2],
@@ -78,7 +92,11 @@ if image_file is not None:
             st.write("Enter the corresponding real-world coordinates.")
             
             # Example real-world coordinates
-            real_coords = [(34.000, -118.000), (34.001, -118.001), (34.002, -118.002)]
+            real_coords = [
+                (34.000, -118.000),
+                (34.001, -118.001),
+                (34.002, -118.002)
+            ]
             st.write(f"Using Real-world Coordinates: {real_coords}")
 
             st.write("Georeferencing the image...")
@@ -88,8 +106,9 @@ if image_file is not None:
             
             geo_img_path = georeference_image(temp_image_path, points, real_coords)
 
-            # Download the georeferenced image
-            st.write("Download the georeferenced image file.")
-            st.download_button(label="Download Georeferenced Image", data=open(geo_img_path, 'rb').read(), file_name="georeferenced_chart.tif")
+            if geo_img_path:
+                # Download the georeferenced image
+                st.write("Download the georeferenced image file.")
+                st.download_button(label="Download Georeferenced Image", data=open(geo_img_path, 'rb').read(), file_name="georeferenced_chart.tif")
         else:
             st.write("Please select at least 3 points to proceed.")
